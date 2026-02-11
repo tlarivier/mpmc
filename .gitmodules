@@ -1,0 +1,30 @@
+[submodule "vendor/ck"]
+	path = vendor/bench/ck
+	url = https://github.com/concurrencykit/ck.git
+[submodule "vendor/utest"]
+	path = vendor/test/utest
+	url = https://github.com/sheredom/utest.h.git
+[submodule "vendor/folly"]
+	path = vendor/bench/folly
+	url = https://github.com/facebook/folly.git
+[submodule "vendor/moodycamel"]
+	path = vendor/bench/moodycamel
+	url = https://github.com/cameron314/concurrentqueue.git
+[submodule "vendor/vyukov"]
+	path = vendor/bench/vyukov
+	url = https://github.com/rigtorp/MPMCQueue.git
+[submodule "vendor/test/utest"]
+	path = vendor/test/utest
+	url = https://github.com/sheredom/utest.h.git
+[submodule "vendor/bench/ck"]
+	path = vendor/bench/ck
+	url = https://github.com/concurrencykit/ck.git
+[submodule "vendor/bench/vyukov"]
+	path = vendor/bench/vyukov
+	url = https://github.com/rigtorp/MPMCQueue.git
+[submodule "vendor/bench/moodycamel"]
+	path = vendor/bench/moodycamel
+	url = https://github.com/cameron314/concurrentqueue.git
+[submodule "vendor/bench/folly"]
+	path = vendor/bench/folly
+	url = https://github.com/facebook/folly.git

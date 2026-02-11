@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+build/
+*.o
+*.so
+*.dSYM/
+
+# OS files
+.DS_Store
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Vendor build artifacts (keep source)
+vendor/ck/src/*.o
+vendor/ck/src/*.so
+vendor/ck/src/*.a
+vendor/ck/doc/
+vendor/ck/regressions/
