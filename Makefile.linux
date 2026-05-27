@@ -1,0 +1,72 @@
+CC      := gcc
+CFLAGS  := -std=c11 -O3 -Wall -Wextra -march=native -D_GNU_SOURCE
+LDFLAGS := -lpthread
+BUILD   := build
+
+PERF_LITE := ../perf-lite
+MSEQ_INC  := -Iinclude
+CK_INC    := -Ivendor/bench/ck/include
+SCQ_INC   := -Ivendor/bench/scq -Ivendor/bench/scq/lf
+PMU_INC   := -I$(PERF_LITE)/include
+
+UNAME_M := $(shell uname -m)
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_M),aarch64)
+  CFLAGS += -DMSEQ_CACHE_LINE=128
+else ifeq ($(UNAME_S)$(UNAME_M),Darwinarm64)
+  CFLAGS += -DMSEQ_CACHE_LINE=128
+else
+  CFLAGS += -DMSEQ_CACHE_LINE=64
+endif
+
+.PHONY: all test bench pmu all-bench clean tsan
+
+all: $(BUILD)/mseq_test $(BUILD)/bench_fair $(BUILD)/bench_pmu $(BUILD)/bench_latency
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/mseq_test: src/tests/main.c include/mpmc_seq.h | $(BUILD)
+	$(CC) $(CFLAGS) $(MSEQ_INC) -Ivendor/test/utest -o $@ $< $(LDFLAGS)
+
+$(BUILD)/bench_fair: src/bench/bench_fair.c include/mpmc_seq.h | $(BUILD)
+	$(CC) $(CFLAGS) $(MSEQ_INC) $(CK_INC) $(SCQ_INC) -o $@ $< $(LDFLAGS)
+
+$(BUILD)/bench_pmu: src/bench/bench_pmu.c include/mpmc_seq.h $(PERF_LITE)/src/hwc/hwcounters.c | $(BUILD)
+	$(CC) $(CFLAGS) $(MSEQ_INC) $(PMU_INC) -o $@ $< $(PERF_LITE)/src/hwc/hwcounters.c $(LDFLAGS)
+
+$(BUILD)/bench_mesi: src/bench/bench_mesi.c | $(BUILD)
+	$(CC) $(CFLAGS) $(MSEQ_INC) -o $@ $< $(LDFLAGS)
+
+$(BUILD)/bench_latency: src/bench/bench_latency.c include/mpmc_seq.h | $(BUILD)
+	$(CC) $(CFLAGS) $(MSEQ_INC) -o $@ $< $(LDFLAGS)
+
+test: $(BUILD)/mseq_test
+	$(BUILD)/mseq_test
+
+bench: $(BUILD)/bench_fair
+	$(BUILD)/bench_fair
+
+pmu: $(BUILD)/bench_pmu
+	@echo "NOTE: PMU counters require root or CAP_PERFMON capability."
+	@echo "  Run: sudo setcap cap_perfmon=ep $(BUILD)/bench_pmu"
+	@echo "  Or:  sudo $(BUILD)/bench_pmu"
+	@echo ""
+	sudo $(BUILD)/bench_pmu
+
+all-bench: $(BUILD)/bench_mesi $(BUILD)/bench_fair $(BUILD)/bench_pmu $(BUILD)/bench_latency
+	@echo "=== MESI Cost Matrix ===" && $(BUILD)/bench_mesi
+	@echo ""
+	@echo "=== Fair Benchmark ===" && $(BUILD)/bench_fair
+	@echo ""
+	@echo "=== Latency ===" && $(BUILD)/bench_latency
+	@echo ""
+	@echo "=== PMU Instrumented ===" && sudo $(BUILD)/bench_pmu
+
+tsan: | $(BUILD)
+	$(CC) -std=c11 -O1 -g -fsanitize=thread -Wall -Wextra -D_GNU_SOURCE $(MSEQ_INC) -Ivendor/test/utest \
+		-o $(BUILD)/mseq_test_tsan src/tests/main.c -lpthread
+	$(BUILD)/mseq_test_tsan
+
+clean:
+	rm -rf $(BUILD)

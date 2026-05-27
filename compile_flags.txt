@@ -1,0 +1,11 @@
+-Iinclude
+-Ivendor/test/utest
+-Ivendor/bench/ck/include
+-Ivendor/bench/scq
+-Ivendor/bench/scq/lf
+-Ivendor/bench/moodycamel
+-Ivendor/bench/vyukov/include
+-std=c11
+-Wall
+-Wextra
+-D_GNU_SOURCE

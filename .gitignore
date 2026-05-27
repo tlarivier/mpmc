@@ -1,6 +1,7 @@
 # Build artifacts
 bin/
 build/
+test_build/
 *.o
 *.so
 *.dSYM/

@@ -1,235 +1,143 @@
-# MPMC — Lock-Free Partitioned Queue for Robotics
+# mseq — Bounded MPMC Queue for Robotics and Embedded Systems
 
-**Header-only. Zero dependencies. 102 tests. Benchmarked.**
+192 lines. Zero allocation. Zero per-slot state. Bounded memory.
 
----
+Verify: `grep -cvE '^\s*(//|/\*|\*|$)' include/mpmc_seq.h`
 
-## Features
+## Why
 
-- **Lock-free operations** — At least one thread always makes progress
-- **Zero producer contention** — Each producer has its own partition, no shared atomics
-- **Header-only implementation** — Just `#include "mpmc.h"` and go
-- **Bulk operations** — Batch claim/release
+Existing MPMC queues are either:
+- Unbounded (moodycamel)          — malloc on the hot path, forbidden in robotics/kernel/firmware
+- Slow at scale (CK-Ring, Vyukov) — single-ring designs collapse under contention
+- Complex (LCRQ, SCQ)             — hundreds of lines, hard to audit for safety-critical use
 
-## IMPORTANT 
-
-This projet is only experimental. DO NOT USE IN PRODUCTION !
-
-## Reasons to use
-
-Most lock-free MPMC queues (Boost, TBB, moodycamel) use a **global atomic counter** shared by all producers. Under contention, this becomes a bottleneck.
-
-This queue uses a **partitioned design**: each producer owns a dedicated ring buffer. Consumers scan all partitions, but producers never contend with each other.
-
-## Reasons NOT to use
-
-- **Not linearizable** — Elements from different producers have no global order. If you need strict FIFO across all producers, use a different queue.
-- **1 producer per partition** — The design assumes independent producers. If your producers coordinate, you lose the contention benefits.
-- **Requires C11** — Uses `<stdatomic.h>`. Won't compile on ancient compilers.
-
-If all you need is a single-producer single-consumer queue, a simple ring buffer will be faster.
+mseq is a bounded, zero-allocation MPMC queue that:
+- Uses 2 sequence counters per partition instead of per-slot state machines
+- Achieves 84 Mops/s at 4P/1C gated (vs CK-Ring: 5.9, SCQD: 7.0) — 14.5× CK-Ring
+- Zero-allocation bounded design suitable for safety-critical systems
+- Has zero malloc/free — the caller provides a pre-allocated buffer
 
 ## Design
 
 ```
-Producer 0 ──▶ [Partition 0: ████████] ──┐
-Producer 1 ──▶ [Partition 1: ██░░░░░░] ──┼──▶ Consumer (scans all)
-Producer 2 ──▶ [Partition 2: █████░░░] ──┘
+Producer 0 ──▶ [produce_seq₀ ████████ consume_seq₀] ──┐
+Producer 1 ──▶ [produce_seq₁ ██░░░░░░ consume_seq₁] ──┼──▶ Consumers (CAS on consume_seq)
+Producer 2 ──▶ [produce_seq₂ █████░░░ consume_seq₂] ──┘
 ```
 
-Each partition is an independent ring buffer with per-slot state tracking:
+No per-slot state. Items between `[consume_seq, produce_seq)` are readable.
+Producer: 1 release-store per item. Consumer: 1 CAS per N items (range claim).
 
-```
-Slot states: FREE → RESERVED → READY → CLAIMED → FREE
-                 ↑              ↑           ↑
-              Producer      Producer    Consumer
-```
-
-**Key invariants:**
-- Only 1 producer writes to a partition
-- Consumers compete via CAS on READY→CLAIMED transition
-- Thread-local rotation distributes consumers across partitions
-
-This design eliminates the "thundering herd" problem where all threads fight over a single counter.
-
-## Basic usage
+## Usage
 
 ```c
-#include "mpmc.h"
+#include "mpmc_seq.h"
 
-mpmc_t queue;
-mpmc_init(&queue, 4, 256, 64);  // 4 partitions, 256 slots, 64B each
+// Zero-allocation: caller provides the buffer
+size_t sz = mseq_buffer_size(4, 256, 64);
+uint8_t buf[sz] __attribute__((aligned(MSEQ_CACHE_LINE)));
 
-// Producer thread (partition = thread ID)
-void* slot = mpmc_reserve(&queue, 0);
+mseq_t q;
+mseq_init(&q, buf, sizeof(buf), 4, 256, 64);  // 4 parts, 256 slots, 64B each
+
+// Producer (partition = producer ID)
+void *slot = mseq_reserve(&q, 0, &rpool);
 if (slot) {
-    memcpy(slot, &my_data, sizeof(my_data));
-    mpmc_submit(&queue, 0);
+    memcpy(slot, &sensor_data, sizeof(sensor_data));
+    mseq_submit(&q, 0);
 }
 
-// Consumer thread (any)
-mpmc_item_t item = mpmc_claim(&queue);
-if (item.data) {
-    process(item.data);
-    mpmc_release(&queue, &item);
+// Consumer (range claim: 1 CAS for N items)
+// NOTE: range claims can wrap around the ring — items are NOT contiguous.
+// Use mseq_claim_item() or manual wrap with c.start_idx/c.mask.
+mseq_claim_t c = mseq_claim(&q, &rpool, cid, 16);  // claim up to 16 items
+if (c.data) {
+    for (uint32_t i = 0; i < c.count; i++) {
+        sensor_data_t *msg = (sensor_data_t *)mseq_claim_item(&q, &c, i);
+        process(msg);
+    }
+    mseq_release(&q, &rpool, cid, &c);
 }
-
-mpmc_destroy(&queue);
 ```
 
-**Important:** Ensure the queue is fully constructed before use by other threads. Similarly, ensure all threads have finished before calling `mpmc_destroy()`.
-
-## Full API
+## API
 
 ```c
-// ============ Lifecycle ============
-int  mpmc_init(mpmc_t *q, uint32_t partitions, uint32_t slots, uint32_t slot_size);
-void mpmc_destroy(mpmc_t *q);
+// Size calculation (for static allocation)
+size_t mseq_buffer_size(uint32_t num_parts, uint32_t slots, uint32_t slot_size);
 
-// ============ Producer (lock-free, O(S) worst case) ============
-void* mpmc_reserve(mpmc_t *q, uint32_t partition);   // Returns slot or NULL if full
-void  mpmc_submit(mpmc_t *q, uint32_t partition);    // Publish reserved slot
-void  mpmc_discard(mpmc_t *q, uint32_t partition);   // Cancel reservation
+// Init (zero-allocation: caller provides aligned buffer)
+int mseq_init(mseq_t *q, void *buf, size_t buf_size,
+              uint32_t num_parts, uint32_t slots, uint32_t slot_size);
 
-// ============ Consumer (lock-free, O(P×S) worst case) ============
-mpmc_item_t mpmc_claim(mpmc_t *q);                   // Returns {.data=NULL} if empty
-void        mpmc_release(mpmc_t *q, mpmc_item_t *item);
+// Producer (single-writer per partition)
+void *mseq_reserve(mseq_t *q, uint32_t partition, mseq_rpool_t *rp);
+void  mseq_submit(mseq_t *q, uint32_t partition);
 
-// ============ Batch operations (high throughput) ============
-int  mpmc_claim_batch(mpmc_t *q, mpmc_batch_t *batch, uint32_t max);
-void mpmc_release_batch(mpmc_t *q, mpmc_batch_t *batch);
-
-// ============ Partition-specific consumer ============
-mpmc_item_t mpmc_claim_partition(mpmc_t *q, uint32_t partition);
+// Consumer (range-based, 1 CAS per N items)
+mseq_claim_t mseq_claim(mseq_t *q, mseq_rpool_t *rp, uint32_t cid, uint32_t range_max);
+void         mseq_release(mseq_t *q, mseq_rpool_t *rp, uint32_t cid, mseq_claim_t *c);
 ```
+
+## Benchmarks — Gated Mode (Apple Silicon, 128-byte cache lines)
+
+Consumer throughput only (items dequeued/sec). mseq uses gated mode
+(per-consumer cursors) for correctness. All bounded designs use 4096 total slots.
+
+| Config  | mseq R=1 | mseq R=16 | mseq R=32 | SCQD | CK-Ring |
+|---------|----------|-----------|-----------|------|---------|
+| 1P/1C   | 8.6      | 15.2      | 14.8      | 12.3 | 98.9    |
+| 2P/2C   | 4.8      | 25.2      | 23.9      | 4.6  | 41.4    |
+| 4P/4C   | 6.4      | 21.0      | 21.0      | 5.9  | 27.5    |
+| 8P/8C   | 5.3      | 11.7      | 12.6      | 5.5  | 0.0     |
+| 16P/16C | 3.8      | 9.1       | 10.1      | 5.6  | 0.0     |
+| 4P/1C   | 4.1      | 54.5      | 84.1      | 7.0  | 5.9     |
+| 4P/8C   | 3.9      | 5.0       | 4.6       | 4.9  | 29.6    |
+
+*All values in Mops/s. CK-Ring crashes at 8P/8C+. See src/bench/bench_fair.c for methodology.
+moodycamel (unbounded, uses malloc) is excluded — see bench_fair.c header for rationale.*
 
 ## Constraints
 
-| Rule | Reason |
-|------|--------|
-| **1 producer per partition** | Eliminates producer contention |
-| **1 reserve at a time** | Call `submit()` or `discard()` before next `reserve()` |
-| **Slots must be power of 2** | Enables fast modulo via bitmask |
-| **Partitions must be power of 2** | Enables fast modulo via bitmask |
+| Rule                                                  | Reason                   |
+|-------------------------------------------------------|--------------------------|
+| 1 producer per partition                              | Zero producer contention |
+| Power-of-2 slots and partitions                       | Fast modulo via bitmask  |
+| Buffer must be aligned to `MSEQ_CACHE_LINE`           | Cache line isolation     |
+| `MSEQ_CACHE_LINE` = 128 for Apple Silicon, 64 for x86 | Avoid false sharing      |
 
-## Other's features
+## Further reading
 
-### Bulk operations
-
-For maximum throughput, use batch operations:
-
-```c
-mpmc_batch_t batch;
-int count = mpmc_claim_batch(&queue, &batch, 64);  // Claim up to 64 items
-
-for (int i = 0; i < count; i++) {
-    process(batch.items[i].data);
-}
-
-mpmc_release_batch(&queue, &batch);  // Release all at once
-```
-
-### Partition-specific consumption
-
-If you know which producer you want to consume from:
-
-```c
-// Only consume from partition 0 (useful for priority lanes)
-mpmc_item_t item = mpmc_claim_partition(&queue, 0);
-```
-
-### Zero-copy pattern
-
-```c
-// Reserve slot, write directly, submit — no intermediate copy
-sensor_data_t* slot = (sensor_data_t*)mpmc_reserve(&queue, producer_id);
-if (slot) {
-    slot->timestamp = now();
-    slot->value = read_sensor();
-    mpmc_submit(&queue, producer_id);
-}
-```
-
-## Included modules
-
-| Header | Purpose |
-|--------|---------|
-| `mpmc.h` | Core lock-free partitioned queue |
-| `mpmc_numa.h` | NUMA-aware allocation and local-first scanning (Linux) |
-
-### NUMA support
-
-On multi-socket systems, use `mpmc_numa.h` for optimal memory locality:
-
-```c
-#include "mpmc_numa.h"
-
-mpmc_numa_t queue;
-mpmc_numa_config_t config = {
-    .num_nodes           = mpmc_numa_get_node_count(),
-    .partitions_per_node = 4,
-    .slots_per_partition = 256,
-    .slot_size           = 64
-};
-mpmc_numa_init(&queue, &config);
-
-// Producer: partition allocated on local NUMA node
-void* slot = mpmc_numa_reserve(&queue, partition_id);
-mpmc_numa_submit(&queue, partition_id);
-
-// Consumer: scans local node first, then remote
-mpmc_item_t item = mpmc_numa_claim_local_first(&queue);
-```
-
-Requires `libnuma` on Linux. Falls back to standard allocation on other platforms.
-
-## Build & Test
-
-```bash
-# Build everything
-mkdir build && cd build
-cmake .. && make -j
-
-# Run tests
-./mpmc_test           # 102 unit tests
-
-# Run examples
-./example_basic       # Basic usage demo
-./example_pipeline    # Multi-stage pipeline
-
-# Run benchmarks
-./benchmark           # Comparative benchmark
-```
-
-## Limitations & assumptions
-
-This section is important for safety-critical applications:
-
-| Aspect | Guarantee | Limitation |
-|--------|-----------|------------|
-| **Progress** | Lock-free (system-wide progress) | Not wait-free: operations may return NULL if queue full/empty |
-| **Ordering** | FIFO per partition | No global FIFO across partitions |
-| **Memory** | Single allocation at init | Not NUMA-aware |
-| **Destruction** | Must ensure no active users | UB if destroyed while in use |
-| **Timing** | O(P×S) worst case | Not hard real-time (no WCET proof) |
-
-## Documentation
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Internal design & memory ordering
-- [docs/PROOF.pdf](docs/PROOF.pdf) — Mathematical proofs (LGN, Hoeffding)
+- `docs/ARCHITECTURE.md` — subsystem boundaries, invariants, data flow, cost model
 
 ## Project structure
 
 ```
 mpmc/
-├── include/
-│   ├── mpmc.h              # Core queue
-│   ├── mpmc_numa.h         # Numa awarness
+├── include/mpmc_seq.h          # The queue (192 lines, header-only)
 ├── src/
-│   ├── tests/              # 102 tests
-│   ├── examples/           # Usage examples
-│   └── bench/              # Benchmarks
-├── docs/                   # Documentation
-└── README.md
+│   ├── tests/main.c            # 29 tests (correctness, stress, SPSC, MPMC)
+│   ├── bench/
+│   │   ├── bench_compare.c     # mseq vs CK-Ring
+│   │   ├── bench_fair.c        # Fair throughput (gated, consumer-only)
+│   │   ├── bench_fair_cxx.cpp  # Fair throughput (moodycamel, Vyukov)
+│   │   ├── bench_latency.c     # Latency percentiles (p50/p99/p999)
+│   │   ├── bench_mesi.c        # MESI cost measurement
+│   │   ├── bench_pmu.c         # PMU-instrumented (Linux only)
+│   │   └── bench_scq.c         # mseq vs SCQ (Nikolaev DISC 2019)
+│   └── examples/
+│       └── evd_mseq.c          # Event bus proof-of-concept
+├── docs/                        # Research documentation
+├── legacy/                      # Previous designs (historical)
+└── vendor/                      # CK-Ring, Vyukov, moodycamel (submodules)
 ```
 
+## Build
+
+```bash
+mkdir build && cd build && cmake .. && make -j
+
+./mseq_test      # 29 tests
+./bench_compare   # mseq vs CK-Ring (Mops/s)
+./bench_mesi      # MESI cost matrix (ns/op)
+```

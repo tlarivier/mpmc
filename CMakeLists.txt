@@ -1,132 +1,75 @@
 cmake_minimum_required(VERSION 3.16)
-project(mpmc_queue C CXX)
+project(mseq C)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
 add_compile_options(-Wall -Wextra -O3 -march=native)
 
-# ============================================================================
-# Sanitizer Options
-# ============================================================================
-option(MPMC_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-option(MPMC_TSAN "Enable ThreadSanitizer (incompatible with ASAN)" OFF)
-option(MPMC_WERROR "Treat warnings as errors" OFF)
-
-if(MPMC_SANITIZE AND MPMC_TSAN)
-    message(FATAL_ERROR "Cannot enable both ASAN and TSAN simultaneously")
-endif()
-
-if(MPMC_SANITIZE)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
-    add_link_options(-fsanitize=address,undefined)
-    message(STATUS "Sanitizers: ASan + UBSan enabled")
-endif()
-
-if(MPMC_TSAN)
-    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
-    add_link_options(-fsanitize=thread)
-    message(STATUS "Sanitizers: TSan enabled")
-endif()
-
-if(MPMC_WERROR)
-    add_compile_options(-Werror)
-    message(STATUS "Warnings treated as errors")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    add_definitions(-DMSEQ_CACHE_LINE=128)
+else()
+    add_definitions(-DMSEQ_CACHE_LINE=64)
 endif()
 
 set(VENDOR ${CMAKE_SOURCE_DIR}/vendor)
 include_directories(include ${VENDOR}/test/utest)
 
-# ============================================================================
-# Tests
-# ============================================================================
-add_executable(mpmc_test src/tests/main.c)
-target_include_directories(mpmc_test PRIVATE src/tests)
-target_link_libraries(mpmc_test pthread)
+add_executable(mseq_test src/tests/main.c)
+target_link_libraries(mseq_test pthread)
 
-# ============================================================================
-# Examples
-# ============================================================================
-add_executable(example_basic src/examples/basic_usage.c)
-target_link_libraries(example_basic pthread)
+add_executable(bench_compare src/bench/bench_compare.c)
+target_include_directories(bench_compare PRIVATE ${VENDOR}/bench/ck/include)
+target_link_libraries(bench_compare pthread)
 
-add_executable(example_pipeline src/examples/robot_pipeline.c)
-target_link_libraries(example_pipeline pthread m)
+add_executable(bench_mesi src/bench/bench_mesi.c)
+target_include_directories(bench_mesi PRIVATE include)
+target_link_libraries(bench_mesi pthread)
 
-# NUMA example (Linux only)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_library(NUMA_LIB numa)
-    if(NUMA_LIB)
-        add_executable(example_numa src/examples/numa_example.c)
-        target_link_libraries(example_numa pthread ${NUMA_LIB})
-        message(STATUS "NUMA support: enabled")
+add_executable(bench_latency src/bench/bench_latency.c)
+target_link_libraries(bench_latency pthread)
+
+if(EXISTS ${CMAKE_SOURCE_DIR}/../perf-lite/src/hwc/hwcounters.c)
+    add_executable(bench_pmu
+        src/bench/bench_pmu.c
+        ${CMAKE_SOURCE_DIR}/../perf-lite/src/hwc/hwcounters.c)
+    target_include_directories(bench_pmu PRIVATE
+        ${CMAKE_SOURCE_DIR}/../perf-lite/include)
+    target_link_libraries(bench_pmu pthread)
+    message(STATUS "PMU benchmark: enabled (perf-lite found)")
+else()
+    message(STATUS "PMU benchmark: disabled (perf-lite not found at ../perf-lite)")
+endif()
+
+add_executable(bench_fair src/bench/bench_fair.c)
+target_include_directories(bench_fair PRIVATE
+    ${VENDOR}/bench/ck/include ${VENDOR}/bench/scq ${VENDOR}/bench/scq/lf)
+target_link_libraries(bench_fair pthread)
+
+add_executable(bench_scq src/bench/bench_scq.c)
+target_include_directories(bench_scq PRIVATE ${VENDOR}/bench/scq ${VENDOR}/bench/scq/lf)
+target_link_libraries(bench_scq pthread)
+
+option(BUILD_CXX_BENCH "Build C++ reference benchmarks (requires moodycamel + rigtorp headers)" OFF)
+if(BUILD_CXX_BENCH)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    if(EXISTS ${VENDOR}/bench/vyukov/include/rigtorp/MPMCQueue.h)
+        add_executable(bench_fair_cxx src/bench/bench_fair_cxx.cpp)
+        target_include_directories(bench_fair_cxx PRIVATE
+            include ${VENDOR}/bench/moodycamel ${VENDOR}/bench/vyukov/include)
+        target_link_libraries(bench_fair_cxx pthread)
+        message(STATUS "C++ benchmark: enabled")
     else()
-        message(STATUS "NUMA support: disabled (libnuma not found)")
+        message(STATUS "C++ benchmark: disabled (rigtorp/MPMCQueue.h not found in ${VENDOR}/bench/vyukov)")
     endif()
 else()
-    message(STATUS "NUMA support: disabled (non-Linux)")
+    message(STATUS "C++ benchmark: disabled (set -DBUILD_CXX_BENCH=ON to enable)")
 endif()
 
-# ============================================================================
-# Benchmark (MPMC + MPMC-NUMA + Folly + CK + Moodycamel + Vyukov)
-# ============================================================================
-set(CK_LIB ${VENDOR}/bench/ck/src/libck.a)
-
-# Find Folly (installed via Homebrew)
-find_package(folly CONFIG QUIET)
-if(NOT folly_FOUND)
-    # Try pkg-config as fallback
-    find_package(PkgConfig)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(FOLLY folly)
-    endif()
-endif()
-
-# C sources
-add_library(bench_c OBJECT
-    src/bench/benchmark.c
-    src/bench/queue_mpmc.c
-    src/bench/queue_mpmc_numa.c
-    src/bench/queue_ck.c
-)
-target_include_directories(bench_c PRIVATE 
-    src/bench 
-    ${VENDOR}/bench/ck/include
-)
-
-# C++ sources (Moodycamel + Vyukov) - compiled without Folly includes
-add_library(bench_cxx OBJECT 
-    src/bench/queue_moodycamel.cpp
-    src/bench/queue_vyukov.cpp
-)
-target_include_directories(bench_cxx PRIVATE 
-    src/bench
-    ${VENDOR}/bench/moodycamel
-    ${VENDOR}/bench/vyukov/include
-)
-
-# Folly compiled separately - Linux only due to macOS header conflicts
-add_library(bench_folly OBJECT src/bench/queue_folly.cpp)
-target_include_directories(bench_folly PRIVATE src/bench)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND folly_FOUND)
-    target_compile_definitions(bench_folly PRIVATE FOLLY_ENABLED)
-    target_link_libraries(bench_folly PRIVATE Folly::folly)
-    message(STATUS "Folly benchmark: enabled")
-else()
-    message(STATUS "Folly benchmark: disabled (stub only)")
-endif()
-
-# Link benchmark
-add_executable(mpmc_bench 
-    $<TARGET_OBJECTS:bench_c> 
-    $<TARGET_OBJECTS:bench_cxx>
-    $<TARGET_OBJECTS:bench_folly>
-)
-target_link_libraries(mpmc_bench ${CK_LIB} pthread)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(folly_FOUND)
-        target_link_libraries(mpmc_bench Folly::folly)
-    endif()
-    if(NUMA_LIB)
-        target_link_libraries(mpmc_bench ${NUMA_LIB})
-    endif()
+option(BUILD_TSAN "Build tests with ThreadSanitizer" OFF)
+if(BUILD_TSAN)
+    add_executable(mseq_test_tsan src/tests/main.c)
+    target_link_libraries(mseq_test_tsan pthread)
+    target_compile_options(mseq_test_tsan PRIVATE -fsanitize=thread -g -O1)
+    target_link_options(mseq_test_tsan PRIVATE -fsanitize=thread)
+    message(STATUS "TSAN test: enabled")
 endif()
