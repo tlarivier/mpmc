@@ -70,7 +70,7 @@ static double bench_moodycamel(int np, int nc) {
             q.enqueue(ptoks[id], v++);
     };
 
-    auto cons = [&](int id, std::atomic<bool> &run) -> uint64_t {
+    auto cons = [&](int, std::atomic<bool> &run) -> uint64_t {
         moodycamel::ConsumerToken ct(q);
         uint64_t v, n = 0;
         while (run.load(std::memory_order_relaxed))
@@ -94,7 +94,7 @@ static double bench_vyukov(int np, int nc) {
             q.try_push(v++);
     };
 
-    auto cons = [&](int id, std::atomic<bool> &run) -> uint64_t {
+    auto cons = [&](int, std::atomic<bool> &run) -> uint64_t {
         uint64_t v, n = 0;
         while (run.load(std::memory_order_relaxed))
             if (q.try_pop(v)) n++;

@@ -64,10 +64,12 @@ slower under WSL2.
 
 32 utest cases. The threaded ones run gated. Producers write
 `TAG(partition, position)`, and consumers check each item after the claim
-and before the release. TSan (`make -f Makefile.linux tsan`) runs in CI.
+and before the release. TSan (`make tsan`) runs in CI.
 
-## Targets
+## Build
 
-`mseq_test`, `bench_fair` (README numbers), `bench_compare`, `bench_scq`,
-`bench_announce`, `bench_latency`, `bench_mesi`, `bench_pmu` (Linux,
-`../perf-lite`), `bench_fair_cxx` (`-DBUILD_CXX_BENCH=ON`), `evd_mseq`.
+`Makefile` + `rules/` (toolchain, functions, compile, link, help). Output in
+`build/obj` and `build/bin`. `make` builds `mseq_test`, the benchmarks
+(`bench_fair` gives the README numbers) and `evd_mseq`. `bench_pmu` is
+built only if `../perf-lite` exists. `make cxx` builds `bench_fair_cxx`.
+`CACHE_LINE` defaults to 128 on aarch64 and 64 elsewhere.

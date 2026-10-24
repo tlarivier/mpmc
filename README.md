@@ -41,14 +41,13 @@ total, one run per configuration.
 
 In these runs, mseq was ahead with more producers than consumers, and
 behind elsewhere, by a wide margin when consumers outnumber partitions.
-CK-Part is CK-Ring with one ring per producer. Full grid: `./bench_fair`.
+CK-Part is CK-Ring with one ring per producer. Full grid: `make bench`.
 
 ## Build
 
 ```bash
 git submodule update --init vendor/test/utest
-cmake -B build -DBUILD_TSAN=ON && cmake --build build && (cd build && ctest)
+make test tsan
 ```
 
-Benchmarks need the other submodules. `Makefile.linux` is the CMake-free
-alternative used by CI.
+`make help` lists the targets. Benchmarks need the other submodules.

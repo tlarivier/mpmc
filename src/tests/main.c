@@ -6,8 +6,7 @@
  * Threaded tests run gated. Producers write TAG(partition, position), and
  * consumers check each item against the positions they claimed, once after
  * the claim and once before the release. A passing run does not prove the
- * absence of races. The TSan build (make tsan, or -DBUILD_TSAN=ON) is the
- * other check.
+ * absence of races. The TSan build (make tsan) is the other check.
  *
  * Invariants:
  *  - Queue buffers come from ALIGNED_BUF (aligned, sized with

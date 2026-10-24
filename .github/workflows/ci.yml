@@ -7,10 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Only the test framework is needed; the benchmark submodules (folly in
-      # particular) are big and not used here.
       - run: git submodule update --init vendor/test/utest
       - name: tests
-        run: make -f Makefile.linux test
+        run: make test
       - name: tests under ThreadSanitizer
-        run: make -f Makefile.linux tsan
+        run: make tsan
